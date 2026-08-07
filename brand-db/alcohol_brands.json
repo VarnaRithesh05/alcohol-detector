@@ -1,0 +1,18 @@
+{
+  "brands": [
+    "jack daniels", "jack daniel", "jameson", "johnnie walker", "chivas regal",
+    "glenfiddich", "macallan", "balvenie", "glenlivet", "laphroaig",
+    "hennessy", "remy martin", "courvoisier", "martell",
+    "absolut", "grey goose", "smirnoff", "belvedere", "ketel one", "ciroc",
+    "bacardi", "captain morgan", "havana club", "malibu",
+    "jose cuervo", "patron", "don julio", "herradura", "olmeca",
+    "gordons", "tanqueray", "beefeater", "bombay sapphire", "hendricks",
+    "baileys", "kahlua", "amaretto", "disaronno", "cointreau", "grand marnier",
+    "budweiser", "corona", "heineken", "carlsberg", "stella artois",
+    "guinness", "foster", "kingfisher", "tuborg",
+    "wine", "champagne", "prosecco", "moet", "veuve clicquot",
+    "beer", "lager", "ale", "stout", "whiskey", "whisky", "vodka",
+    "rum", "gin", "tequila", "brandy", "bourbon", "scotch",
+    "alcohol", "liquor", "spirit", "brew"
+  ]
+}
