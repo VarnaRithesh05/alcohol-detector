@@ -1,0 +1,7 @@
+names:
+  0: alcohol
+  1: no-alcohol
+path: D:/alcohol-detector/python-engine/dataset
+test: images/test
+train: images/train
+val: images/val

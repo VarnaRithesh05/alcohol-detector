@@ -17,6 +17,8 @@ import sys
 import subprocess
 from pathlib import Path
 from ultralytics import YOLO
+from ocr_reader import OCRReader
+import difflib
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [DETECTOR] %(message)s")
 log = logging.getLogger(__name__)
@@ -24,11 +26,12 @@ log = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────────
 SERVER_URL        = "http://localhost:3001"
 CONFIDENCE_THRESH = 0.20
-DEBOUNCE_FRAMES   = 1
+DEBOUNCE_FRAMES   = 3
 FRAME_SKIP        = 1
-MODEL_NAME        = "yolov8n.pt"
+MODEL_PATH        = Path(__file__).parent / "yolov8s_alcohol.pt"
+MODEL_NAME        = str(MODEL_PATH) if MODEL_PATH.exists() else "yolov8s.pt"
 BRAND_DB_PATH     = Path(__file__).parent.parent / "brand-db" / "alcohol_brands.json"
-BOTTLE_CLASSES    = {"bottle", "wine glass", "cup"}
+BOTTLE_CLASSES    = {"bottle", "wine glass", "cup", "alcohol"}
 
 # ── Brand DB ────────────────────────────────────────────────────────────────
 def load_brand_db(path: Path) -> set:
@@ -38,8 +41,23 @@ def load_brand_db(path: Path) -> set:
     log.info(f"Loaded {len(brands)} alcohol brand keywords")
     return brands
 
-def match_brand(label_text: str, brand_db: set) -> bool:
-    return any(brand in label_text.lower() for brand in brand_db)
+def match_brand(label_text: str, brand_db: set, threshold=0.7) -> bool:
+    label_lower = label_text.lower().strip()
+    if not label_lower:
+        return False
+    # 1. Direct match check
+    for brand in brand_db:
+        if brand in label_lower:
+            return True
+    # 2. Fuzzy match word check (edit distance / ratio)
+    words = label_lower.split()
+    for brand in brand_db:
+        for w in words:
+            if len(w) >= 3 and len(brand) >= 3:
+                ratio = difflib.SequenceMatcher(None, brand, w).ratio()
+                if ratio >= threshold:
+                    return True
+    return False
 
 # ── Pre-check ───────────────────────────────────────────────────────────────
 class PreChecker:
@@ -87,6 +105,7 @@ class Debouncer:
 class DetectionEngine:
     def __init__(self):
         self.brand_db  = load_brand_db(BRAND_DB_PATH)
+        self.ocr       = OCRReader()
         self.model     = YOLO(MODEL_NAME)
         self.pre       = PreChecker()
         self.debouncer = Debouncer(DEBOUNCE_FRAMES)
@@ -190,15 +209,23 @@ class DetectionEngine:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             drinking = check_action(x1, y1, x2, y2, persons)
             
-            brand_hit = match_brand(cls_name, self.brand_db)
-            color     = (0, 0, 255) if drinking else ((0, 200, 0) if brand_hit else (200, 200, 0))
+            ocr_text = ""
+            if conf >= CONFIDENCE_THRESH and cls_name in BOTTLE_CLASSES:
+                crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
+                ocr_text = self.ocr.read(crop)
+
+            brand_text = ocr_text if ocr_text else cls_name
+            brand_hit  = match_brand(brand_text, self.brand_db)
+            color      = (0, 0, 255) if drinking else ((0, 200, 0) if brand_hit else (200, 200, 0))
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             
-            label = f"{cls_name} {conf:.2f}" + (" [DRINKING]" if drinking else "")
+            display_label = f"{brand_text[:15]} {conf:.2f}" if ocr_text else f"{cls_name} {conf:.2f}"
+            label = display_label + (" [DRINKING]" if drinking else "")
             cv2.putText(frame, label, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
             det = {"class": cls_name, "confidence": round(conf, 3),
                    "bbox": [x1, y1, x2, y2], "brand_matched": brand_hit,
+                   "ocr_text": ocr_text,
                    "drinking_action": drinking,
                    "timestamp": time.time()}
             detections.append(det)
@@ -228,15 +255,24 @@ class DetectionEngine:
                 nx2, ny2 = w - rx1, h - ry1
                 
                 drinking = check_action(rx1, ry1, rx2, ry2, persons_180)
-                brand_hit = match_brand(cls_name, self.brand_db)
-                color     = (0, 0, 255) if drinking else ((0, 200, 0) if brand_hit else (200, 200, 0))
+                
+                ocr_text = ""
+                if conf >= CONFIDENCE_THRESH and cls_name in BOTTLE_CLASSES:
+                    crop = frame_180[max(0, ry1):min(h, ry2), max(0, rx1):min(w, rx2)]
+                    ocr_text = self.ocr.read(crop)
+
+                brand_text = ocr_text if ocr_text else cls_name
+                brand_hit  = match_brand(brand_text, self.brand_db)
+                color      = (0, 0, 255) if drinking else ((0, 200, 0) if brand_hit else (200, 200, 0))
                 cv2.rectangle(frame, (nx1, ny1), (nx2, ny2), color, 2)
                 
-                label = f"{cls_name} {conf:.2f} (inv)" + (" [DRINKING]" if drinking else "")
+                display_label = f"{brand_text[:15]} {conf:.2f} (inv)" if ocr_text else f"{cls_name} {conf:.2f} (inv)"
+                label = display_label + (" [DRINKING]" if drinking else "")
                 cv2.putText(frame, label, (nx1, ny1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
                 det = {"class": f"{cls_name} (inv)", "confidence": round(conf, 3),
                        "bbox": [nx1, ny1, nx2, ny2], "brand_matched": brand_hit,
+                       "ocr_text": ocr_text,
                        "drinking_action": drinking,
                        "timestamp": time.time()}
                 detections.append(det)
