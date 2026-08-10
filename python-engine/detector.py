@@ -28,8 +28,8 @@ SERVER_URL        = "http://localhost:3001"
 CONFIDENCE_THRESH = 0.20
 DEBOUNCE_FRAMES   = 3
 FRAME_SKIP        = 1
-MODEL_PATH        = Path(__file__).parent / "yolov8s_alcohol.pt"
-MODEL_NAME        = str(MODEL_PATH) if MODEL_PATH.exists() else "yolov8s.pt"
+MODEL_PATH        = Path(__file__).parent / "yolov8n_alcohol.pt"
+MODEL_NAME        = str(MODEL_PATH) if MODEL_PATH.exists() else "yolov8n.pt"
 BRAND_DB_PATH     = Path(__file__).parent.parent / "brand-db" / "alcohol_brands.json"
 BOTTLE_CLASSES    = {"bottle", "wine glass", "cup", "alcohol"}
 
