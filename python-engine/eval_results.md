@@ -1,8 +1,16 @@
 # Alcohol Detector Evaluation Results
 
+## Dataset Split Information
+- **Train Set**: 685 images
+- **Validation Set**: 85 images
+- **Test Set**: 87 images
+- **Epochs Trained**: 15 epochs
+
+## Quantitative Metrics Table
+
 | Model | Conf Thresh | Precision | Recall | F1-Score | mAP@50 | Latency (ms) | FPS |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Stock COCO YOLOv8n (Baseline) | 0.20 | 0.762 | 0.000 | 0.000 | 0.784 | 85.23 | 11.7 |
-| Stock COCO YOLOv8n (Baseline) | 0.50 | 0.885 | 0.000 | 0.000 | 0.750 | 37.3 | 26.8 |
-| Fine-Tuned YOLOv8n (Alcohol) | 0.20 | 0.914 | 0.932 | 0.923 | 0.941 | 43.24 | 23.1 |
-| Fine-Tuned YOLOv8n (Alcohol) | 0.50 | 0.965 | 0.884 | 0.923 | 0.920 | 36.38 | 27.5 |
+| Stock COCO YOLOv8n (Baseline) | 0.20 | 0.353 | 0.620 | 0.450 | 0.364 | 120.45 | 8.3 |
+| Stock COCO YOLOv8n (Baseline) | 0.50 | 0.537 | 0.482 | 0.508 | 0.364 | 132.31 | 7.6 |
+| Fine-Tuned YOLOv8n (Alcohol) | 0.20 | 0.767 | 0.723 | 0.744 | 0.697 | 102.32 | 9.8 |
+| Fine-Tuned YOLOv8n (Alcohol) | 0.50 | 0.881 | 0.650 | 0.748 | 0.697 | 101.96 | 9.8 |

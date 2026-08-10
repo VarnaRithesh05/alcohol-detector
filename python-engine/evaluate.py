@@ -2,11 +2,11 @@
 evaluate.py — Evaluation Harness for Alcohol Detector
 
 Compares baseline stock COCO YOLOv8n vs fine-tuned alcohol YOLOv8 model.
-Calculates Precision, Recall, F1, mAP@50, and FPS across confidence thresholds (0.20 vs 0.50).
-Generates annotated sample figure images:
+Calculates Precision, Recall, F1, mAP@50, and FPS across confidence thresholds (0.20 vs 0.50) on a real, held-out test set.
+Generates real annotated sample figure images:
 1. figure_ocr_upright.jpg — Upright detection with EasyOCR brand match.
 2. figure_inverted_180.jpg — 180° rotation fallback pass catching inverted bottle.
-3. figure_false_positive.jpg — Honest edge case / false positive (mug misdetection).
+3. figure_false_positive.jpg — Honest edge case / false positive (mug/soda misdetection).
 
 Outputs Markdown table to eval_results.md and CSV to eval_results.csv.
 """
@@ -23,158 +23,279 @@ from detector import DetectionEngine, load_brand_db, match_brand, BOTTLE_CLASSES
 ENGINE_DIR = Path(__file__).parent
 BRAND_DB_PATH = ENGINE_DIR.parent / "brand-db" / "alcohol_brands.json"
 
-def create_synthetic_test_set(test_dir: Path):
-    """Generates synthetic test images with known ground truths if test set is empty."""
-    os.makedirs(test_dir, exist_ok=True)
+def calculate_iou(box1, box2):
+    """Calculates Intersection over Union (IoU) between two bounding boxes [x1, y1, x2, y2]."""
+    xi1 = max(box1[0], box2[0])
+    yi1 = max(box1[1], box2[1])
+    xi2 = min(box1[2], box2[2])
+    yi2 = min(box1[3], box2[3])
     
-    # 1. Upright bottle test frame
-    img_upright = np.zeros((480, 640, 3), dtype=np.uint8) + 220
-    # Draw bottle shape
-    cv2.rectangle(img_upright, (250, 150), (350, 420), (50, 100, 180), -1)
-    cv2.rectangle(img_upright, (285, 90), (315, 150), (50, 100, 180), -1)
-    cv2.putText(img_upright, "KINGFISHER", (255, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-    cv2.imwrite(str(test_dir / "frame_001_upright.jpg"), img_upright)
-
-    # 2. Inverted bottle test frame
-    img_inverted = np.zeros((480, 640, 3), dtype=np.uint8) + 220
-    cv2.rectangle(img_inverted, (250, 60), (350, 330), (40, 80, 160), -1)
-    cv2.rectangle(img_inverted, (285, 330), (315, 390), (40, 80, 160), -1)
-    cv2.putText(img_inverted, "OLD MONK", (260, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-    cv2.imwrite(str(test_dir / "frame_002_inverted.jpg"), img_inverted)
-
-    # 3. Cup/Mug edge case frame
-    img_mug = np.zeros((480, 640, 3), dtype=np.uint8) + 220
-    cv2.rectangle(img_mug, (260, 200), (380, 380), (180, 140, 100), -1)
-    cv2.ellipse(img_mug, (380, 290), (30, 50), 0, 0, 360, (180, 140, 100), 10)
-    cv2.putText(img_mug, "COFFEE MUG", (270, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-    cv2.imwrite(str(test_dir / "frame_003_mug.jpg"), img_mug)
+    inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+    
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    
+    union_area = box1_area + box2_area - inter_area
+    if union_area == 0:
+        return 0.0
+    return inter_area / union_area
 
 def generate_sample_figures(engine: DetectionEngine):
-    """Saves the 3 required annotated figure images for the paper."""
-    print("Generating sample figures for research paper...")
+    """Saves the 3 required annotated figure images based on real model output."""
+    print("Generating real sample figures for research paper...")
+    test_img_dir = ENGINE_DIR / "dataset" / "images" / "test"
     
-    # Figure 1: Upright bottle with EasyOCR label match
-    fig1 = np.zeros((480, 640, 3), dtype=np.uint8) + 230
-    cv2.rectangle(fig1, (250, 140), (350, 420), (40, 80, 160), -1) # Bottle body
-    cv2.rectangle(fig1, (285, 80), (315, 140), (40, 80, 160), -1)  # Neck
-    cv2.rectangle(fig1, (260, 230), (340, 310), (255, 255, 255), -1) # Label background
-    cv2.putText(fig1, "KINGFISHER", (262, 275), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 150), 2)
-    
-    # Annotate detection bbox & OCR overlay
-    cv2.rectangle(fig1, (245, 75), (355, 425), (0, 200, 0), 2)
-    cv2.putText(fig1, "kingfisher 0.92 [OCR MATCH]", (245, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
-    cv2.imwrite(str(ENGINE_DIR / "figure_ocr_upright.jpg"), fig1)
+    # 1. Figure 1: Upright bottle with EasyOCR label match
+    fig1_path = test_img_dir / "145_jpg.rf.2a0f9c3021734b7a38a99fef2641d476.jpg"
+    if fig1_path.exists():
+        img = cv2.imread(str(fig1_path))
+        # process_frame runs YOLO + EasyOCR and draws boxes on the frame in place
+        engine.process_frame(img)
+        cv2.imwrite(str(ENGINE_DIR / "figure_ocr_upright.jpg"), img)
+        print("Generated figure_ocr_upright.jpg")
+    else:
+        print("Warning: Figure 1 source image not found.")
 
-    # Figure 2: Inverted bottle detected via 180° rotation fallback
-    fig2 = np.zeros((480, 640, 3), dtype=np.uint8) + 230
-    cv2.rectangle(fig2, (250, 60), (350, 340), (40, 80, 160), -1)  # Inverted body
-    cv2.rectangle(fig2, (285, 340), (315, 400), (40, 80, 160), -1) # Inverted neck
-    cv2.rectangle(fig2, (260, 150), (340, 230), (255, 255, 255), -1)
-    cv2.putText(fig2, "OLD MONK", (266, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 150), 2)
-    
-    # Annotate 180 fallback bbox
-    cv2.rectangle(fig2, (245, 55), (355, 405), (0, 200, 0), 2)
-    cv2.putText(fig2, "old monk 0.88 (inv) [180 ROTATION PASS]", (210, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
-    cv2.imwrite(str(ENGINE_DIR / "figure_inverted_180.jpg"), fig2)
+    # 2. Figure 2: Inverted bottle detected via 180° rotation fallback
+    fig2_path = test_img_dir / "15_jpg.rf.d4c95e424a445f907ff121bbbde1fcfb.jpg"
+    if fig2_path.exists():
+        img = cv2.imread(str(fig2_path))
+        engine.process_frame(img)
+        cv2.imwrite(str(ENGINE_DIR / "figure_inverted_180.jpg"), img)
+        print("Generated figure_inverted_180.jpg")
+    else:
+        print("Warning: Figure 2 source image not found.")
 
-    # Figure 3: False Positive (Coffee Mug misdetected as container)
-    fig3 = np.zeros((480, 640, 3), dtype=np.uint8) + 230
-    cv2.rectangle(fig3, (240, 180), (380, 380), (160, 120, 80), -1)
-    cv2.ellipse(fig3, (380, 280), (30, 50), 0, 0, 360, (160, 120, 80), 8)
-    cv2.rectangle(fig3, (235, 175), (390, 385), (200, 200, 0), 2)
-    cv2.putText(fig3, "cup 0.38 [FALSE POSITIVE: Non-Alcohol Mug]", (210, 165), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 0), 2)
-    cv2.imwrite(str(ENGINE_DIR / "figure_false_positive.jpg"), fig3)
+    # 3. Figure 3: False Positive (Non-Alcohol Soda Container misdetected as container)
+    fig3_path = test_img_dir / "CCU-3-LITROS-150x150_jpg.rf.5311107839733559d83908132e65f4dc.jpg"
+    if fig3_path.exists():
+        img = cv2.imread(str(fig3_path))
+        engine.process_frame(img)
+        cv2.imwrite(str(ENGINE_DIR / "figure_false_positive.jpg"), img)
+        print("Generated figure_false_positive.jpg")
+    else:
+        print("Warning: Figure 3 source image not found.")
+
+def evaluate_model_metrics(model_path: Path, is_baseline: bool, conf_thresh: float):
+    """Evaluates Precision, Recall, F1, mAP@50, average latency, and FPS on the real test set."""
+    model = YOLO(str(model_path))
+    test_img_dir = ENGINE_DIR / "dataset" / "images" / "test"
+    test_lbl_dir = ENGINE_DIR / "dataset" / "labels" / "test"
+    
+    test_images = list(test_img_dir.glob("*.jpg")) + list(test_img_dir.glob("*.jpeg")) + list(test_img_dir.glob("*.png"))
+    
+    all_preds = []
+    all_gts = {}
+    
+    total_time = 0.0
+    total_frames = 0
+    
+    for img_path in test_images:
+        img_name = img_path.name
+        frame = cv2.imread(str(img_path))
+        if frame is None:
+            continue
+            
+        h, w = frame.shape[:2]
+        
+        # Load Ground Truths for class 0 (alcohol)
+        gts = []
+        lbl_path = test_lbl_dir / f"{img_path.stem}.txt"
+        if lbl_path.exists():
+            with open(lbl_path) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) == 5:
+                        cls_id = int(parts[0])
+                        # We only evaluate detection of the positive class (alcohol)
+                        if cls_id == 0: 
+                            xc, yc, bw, bh = map(float, parts[1:])
+                            x1 = (xc - bw / 2.0) * w
+                            y1 = (yc - bh / 2.0) * h
+                            x2 = (xc + bw / 2.0) * w
+                            y2 = (yc + bh / 2.0) * h
+                            gts.append([x1, y1, x2, y2])
+        all_gts[img_name] = gts
+        
+        # Run inference
+        t0 = time.time()
+        results = model(frame, verbose=False)[0]
+        t1 = time.time()
+        
+        total_time += (t1 - t0)
+        total_frames += 1
+        
+        # Collect predictions
+        for box in results.boxes:
+            conf = float(box.conf[0])
+            cls_id = int(box.cls[0])
+            cls_name = model.names[cls_id].lower()
+            
+            # Decide if prediction represents an alcohol warning trigger
+            is_match = False
+            if is_match := (
+                cls_name in ["bottle", "wine glass", "cup"]
+                if is_baseline
+                else cls_id == 0
+            ):
+                bbox = box.xyxy[0].tolist() # [x1, y1, x2, y2]
+                all_preds.append({
+                    "conf": conf,
+                    "image_name": img_name,
+                    "bbox": bbox
+                })
+                
+    # Calculate Precision, Recall, F1 for the given conf_thresh
+    filtered_preds = [p for p in all_preds if p["conf"] >= conf_thresh]
+    
+    tp, fp, fn = 0, 0, 0
+    
+    for img_path in test_images:
+        img_name = img_path.name
+        gts = all_gts.get(img_name, [])
+        preds = [p for p in filtered_preds if p["image_name"] == img_name]
+        
+        # Sort predictions by confidence descending
+        preds = sorted(preds, key=lambda x: x["conf"], reverse=True)
+        
+        matched_gts = set()
+        
+        for p in preds:
+            best_iou = -1
+            best_gt_idx = -1
+            for idx, gt in enumerate(gts):
+                if idx in matched_gts:
+                    continue
+                iou = calculate_iou(p["bbox"], gt)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_gt_idx = idx
+            
+            if best_iou >= 0.5:
+                tp += 1
+                matched_gts.add(best_gt_idx)
+            else:
+                fp += 1
+                
+        fn += (len(gts) - len(matched_gts))
+        
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall + 1e-6)
+    
+    # Calculate AP@50 (Average Precision at IoU=0.5)
+    # Sort ALL predictions across the test set by confidence descending
+    sorted_preds = sorted(all_preds, key=lambda x: x["conf"], reverse=True)
+    
+    tp_list = []
+    fp_list = []
+    
+    matched_gts_global = {img_name: set() for img_name in all_gts}
+    total_gts = sum(len(gts) for gts in all_gts.values())
+    
+    for p in sorted_preds:
+        img_name = p["image_name"]
+        gts = all_gts.get(img_name, [])
+        best_iou = -1
+        best_gt_idx = -1
+        for idx, gt in enumerate(gts):
+            if idx in matched_gts_global[img_name]:
+                continue
+            iou = calculate_iou(p["bbox"], gt)
+            if iou > best_iou:
+                best_iou = iou
+                best_gt_idx = idx
+                
+        if best_iou >= 0.5:
+            tp_list.append(1)
+            fp_list.append(0)
+            matched_gts_global[img_name].add(best_gt_idx)
+        else:
+            tp_list.append(0)
+            fp_list.append(1)
+            
+    tp_cum = np.cumsum(tp_list)
+    fp_cum = np.cumsum(fp_list)
+    
+    precisions = tp_cum / (tp_cum + fp_cum + 1e-6)
+    recalls = tp_cum / (total_gts + 1e-6)
+    
+    # Calculate Area Under the PR Curve (VOC AP)
+    ap = 0.0
+    if len(recalls) > 0:
+        mrec = np.concatenate(([0.0], recalls, [1.0]))
+        mpre = np.concatenate(([0.0], precisions, [0.0]))
+        
+        for i in range(len(mpre) - 2, -1, -1):
+            mpre[i] = max(mpre[i], mpre[i + 1])
+            
+        i = np.where(mrec[1:] != mrec[:-1])[0]
+        ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
+        
+    avg_latency_ms = (total_time / total_frames * 1000) if total_frames > 0 else 0.0
+    fps = (total_frames / total_time) if total_time > 0 else 0.0
+    
+    return precision, recall, f1, ap, avg_latency_ms, fps
 
 def run_evaluation():
-    test_dir = ENGINE_DIR / "test_frames"
-    create_synthetic_test_set(test_dir)
-    
     models = {
-        "Stock COCO YOLOv8s (Baseline)": ENGINE_DIR / "yolov8s.pt",
-        "Fine-Tuned YOLOv8s (Alcohol)": ENGINE_DIR / "yolov8s_alcohol.pt"
+        "Stock COCO YOLOv8n (Baseline)": ENGINE_DIR / "yolov8n.pt",
+        "Fine-Tuned YOLOv8n (Alcohol)": ENGINE_DIR / "yolov8n_alcohol.pt"
     }
     
-    # If fine-tuned weights file doesn't exist yet, copy base model for evaluation baseline comparison
-    if not (ENGINE_DIR / "yolov8s_alcohol.pt").exists():
-        import shutil
-        shutil.copy(ENGINE_DIR / "yolov8s.pt", ENGINE_DIR / "yolov8s_alcohol.pt")
+    # Check that baseline model exists, download if missing
+    if not (ENGINE_DIR / "yolov8n.pt").exists():
+        print("Downloading stock COCO YOLOv8n baseline model...")
+        YOLO("yolov8n.pt")
+        
+    # Verify the fine-tuned model exists
+    if not (ENGINE_DIR / "yolov8n_alcohol.pt").exists():
+        print("Error: yolov8n_alcohol.pt not found! Please run training first.")
+        return
 
     thresholds = [0.20, 0.50]
     eval_records = []
     
-    test_images = list(test_dir.glob("*.jpg"))
-    
     print("\n" + "="*70)
-    print("RUNNING ALCOHOL DETECTOR BENCHMARK EVALUATION")
+    print("RUNNING ALCOHOL DETECTOR REAL BENCHMARK EVALUATION")
     print("="*70 + "\n")
+    
+    # Count dataset sizes
+    train_size = len(list((ENGINE_DIR / "dataset" / "images" / "train").glob("*")))
+    val_size = len(list((ENGINE_DIR / "dataset" / "images" / "val").glob("*")))
+    test_size = len(list((ENGINE_DIR / "dataset" / "images" / "test").glob("*")))
+    
+    print(f"Dataset Split Sizes -> Train: {train_size} | Val: {val_size} | Test: {test_size}")
     
     for model_name, model_path in models.items():
         if not model_path.exists():
             continue
-        
-        yolo_model = YOLO(str(model_path))
-        
+            
         for thresh in thresholds:
-            total_time = 0.0
-            total_frames = 0
-            tp, fp, fn = 0, 0, 0
-            
-            for img_path in test_images:
-                frame = cv2.imread(str(img_path))
-                if frame is None:
-                    continue
-                
-                t0 = time.time()
-                results = yolo_model(frame, verbose=False, conf=thresh)[0]
-                t1 = time.time()
-                
-                total_time += (t1 - t0)
-                total_frames += 1
-                
-                # Check detections
-                detections = [r for r in results.boxes if yolo_model.names[int(r.cls[0])].lower() in BOTTLE_CLASSES or yolo_model.names[int(r.cls[0])].lower() == "alcohol"]
-                
-                is_mug = "mug" in img_path.name
-                if len(detections) > 0:
-                    if is_mug:
-                        fp += 1  # False positive on mug frame
-                    else:
-                        tp += 1  # True positive on alcohol/bottle frame
-                else:
-                    if not is_mug:
-                        fn += 1  # False negative on alcohol frame
-            
-            avg_latency_ms = (total_time / total_frames * 1000) if total_frames > 0 else 0.0
-            fps = (total_frames / total_time) if total_time > 0 else 0.0
-            
-            # Adjusted empirical metric estimates based on benchmark validation runs
-            if "Baseline" in model_name:
-                precision = round(tp / (tp + fp), 3) if (tp + fp) > 0 else (0.762 if thresh == 0.20 else 0.885)
-                recall    = round(tp / (tp + fn), 3) if (tp + fn) > 0 else (0.810 if thresh == 0.20 else 0.690)
-                map50     = 0.784 if thresh == 0.20 else 0.750
-            else:
-                precision = 0.914 if thresh == 0.20 else 0.965
-                recall    = 0.932 if thresh == 0.20 else 0.884
-                map50     = 0.941 if thresh == 0.20 else 0.920
-                
-            f1 = round(2 * (precision * recall) / (precision + recall + 1e-6), 3)
+            p, r, f1, map50, latency, fps = evaluate_model_metrics(model_path, "Baseline" in model_name, thresh)
             
             rec = {
                 "Model": model_name,
                 "Conf Thresh": thresh,
-                "Precision": precision,
-                "Recall": recall,
-                "F1-Score": f1,
-                "mAP@50": map50,
-                "Latency (ms)": round(avg_latency_ms, 2),
+                "Precision": round(p, 3),
+                "Recall": round(r, 3),
+                "F1-Score": round(f1, 3),
+                "mAP@50": round(map50, 3),
+                "Latency (ms)": round(latency, 2),
                 "FPS": round(fps, 1)
             }
             eval_records.append(rec)
-            print(f"[{model_name} @ conf={thresh:.2f}] P: {precision:.3f} | R: {recall:.3f} | F1: {f1:.3f} | mAP@50: {map50:.3f} | FPS: {fps:.1f}")
+            print(f"[{model_name} @ conf={thresh:.2f}] P: {p:.3f} | R: {r:.3f} | F1: {f1:.3f} | mAP@50: {map50:.3f} | Latency: {latency:.2f}ms | FPS: {fps:.1f}")
 
-    # Generate Markdown Table
+    # Generate Markdown Table and File
     md_lines = [
         "# Alcohol Detector Evaluation Results\n",
+        "## Dataset Split Information",
+        f"- **Train Set**: {train_size} images",
+        f"- **Validation Set**: {val_size} images",
+        f"- **Test Set**: {test_size} images",
+        "- **Epochs Trained**: 15 epochs\n",
+        "## Quantitative Metrics Table\n",
         "| Model | Conf Thresh | Precision | Recall | F1-Score | mAP@50 | Latency (ms) | FPS |",
         "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
     ]
@@ -190,11 +311,18 @@ def run_evaluation():
         writer = csv.DictWriter(f, fieldnames=eval_records[0].keys())
         writer.writeheader()
         writer.writerows(eval_records)
+        
+    # Run ultralytics val sanity check on the fine-tuned model
+    print("\nRunning Ultralytics Native Validation check on fine-tuned model...")
+    ft_model = YOLO(str(ENGINE_DIR / "yolov8n_alcohol.pt"))
+    ft_model.val(data=str(ENGINE_DIR / "dataset" / "data.yaml"), split="test", verbose=True)
 
+    # Generate real sample figures
     engine = DetectionEngine()
     generate_sample_figures(engine)
-    print("\nEvaluation completed. Results saved to eval_results.md and eval_results.csv.")
-    print("Sample figure images generated: figure_ocr_upright.jpg, figure_inverted_180.jpg, figure_false_positive.jpg\n")
+    
+    print("\nEvaluation completed. Real results saved to eval_results.md and eval_results.csv.")
+    print("Real sample figure images generated: figure_ocr_upright.jpg, figure_inverted_180.jpg, figure_false_positive.jpg\n")
 
 if __name__ == "__main__":
     run_evaluation()
