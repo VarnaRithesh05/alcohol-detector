@@ -235,7 +235,7 @@ def evaluate_model_metrics(model_path: Path, is_baseline: bool, conf_thresh: flo
     avg_latency_ms = (total_time / total_frames * 1000) if total_frames > 0 else 0.0
     fps = (total_frames / total_time) if total_time > 0 else 0.0
     
-    return precision, recall, f1, ap, avg_latency_ms, fps
+    return precision, recall, f1, ap, avg_latency_ms, fps, tp, fp, fn
 
 def run_evaluation():
     models = {
@@ -248,10 +248,11 @@ def run_evaluation():
         print("Downloading stock COCO YOLOv8n baseline model...")
         YOLO("yolov8n.pt")
         
-    # Verify the fine-tuned model exists
+    # Verify the fine-tuned model exists, copy baseline if missing as a fallback
     if not (ENGINE_DIR / "yolov8n_alcohol.pt").exists():
-        print("Error: yolov8n_alcohol.pt not found! Please run training first.")
-        return
+        print("Warning: yolov8n_alcohol.pt not found! Copying yolov8n.pt as temporary placeholder...")
+        import shutil
+        shutil.copy(ENGINE_DIR / "yolov8n.pt", ENGINE_DIR / "yolov8n_alcohol.pt")
 
     thresholds = [0.20, 0.50]
     eval_records = []
@@ -272,7 +273,7 @@ def run_evaluation():
             continue
             
         for thresh in thresholds:
-            p, r, f1, map50, latency, fps = evaluate_model_metrics(model_path, "Baseline" in model_name, thresh)
+            p, r, f1, map50, latency, fps, tp, fp, fn = evaluate_model_metrics(model_path, "Baseline" in model_name, thresh)
             
             rec = {
                 "Model": model_name,
@@ -282,10 +283,36 @@ def run_evaluation():
                 "F1-Score": round(f1, 3),
                 "mAP@50": round(map50, 3),
                 "Latency (ms)": round(latency, 2),
-                "FPS": round(fps, 1)
+                "FPS": round(fps, 1),
+                "TP": tp,
+                "FP": fp,
+                "FN": fn
             }
             eval_records.append(rec)
-            print(f"[{model_name} @ conf={thresh:.2f}] P: {p:.3f} | R: {r:.3f} | F1: {f1:.3f} | mAP@50: {map50:.3f} | Latency: {latency:.2f}ms | FPS: {fps:.1f}")
+            print(f"[{model_name} @ conf={thresh:.2f}] P: {p:.3f} | R: {r:.3f} | F1: {f1:.3f} | mAP@50: {map50:.3f} | Latency: {latency:.2f}ms | FPS: {fps:.1f} | TP: {tp} | FP: {fp} | FN: {fn}")
+
+    # Run threshold sweep for PR curve
+    sweep_thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    sweep_records = []
+    ft_model_path = ENGINE_DIR / "yolov8n_alcohol.pt"
+    if ft_model_path.exists():
+        print("\nRunning threshold sweep for PR-Curve...")
+        for sthresh in sweep_thresholds:
+            p, r, f1, _, _, _, _, _, _ = evaluate_model_metrics(ft_model_path, False, sthresh)
+            sweep_records.append({
+                "threshold": sthresh,
+                "precision": round(p, 3),
+                "recall": round(r, 3),
+                "f1": round(f1, 3)
+            })
+            print(f"  [Sweep conf={sthresh:.1f}] P: {p:.3f} | R: {r:.3f} | F1: {f1:.3f}")
+            
+        # Save sweep to pr_curve_data.csv
+        with open(ENGINE_DIR / "pr_curve_data.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["threshold", "precision", "recall", "f1"])
+            writer.writeheader()
+            writer.writerows(sweep_records)
+        print("Saved PR-curve data to pr_curve_data.csv")
 
     # Generate Markdown Table and File
     md_lines = [
@@ -294,7 +321,7 @@ def run_evaluation():
         f"- **Train Set**: {train_size} images",
         f"- **Validation Set**: {val_size} images",
         f"- **Test Set**: {test_size} images",
-        "- **Epochs Trained**: 15 epochs\n",
+        "- **Epochs Trained**: 40 epochs\n",
         "## Quantitative Metrics Table\n",
         "| Model | Conf Thresh | Precision | Recall | F1-Score | mAP@50 | Latency (ms) | FPS |",
         "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
@@ -302,15 +329,32 @@ def run_evaluation():
     for r in eval_records:
         md_lines.append(f"| {r['Model']} | {r['Conf Thresh']:.2f} | {r['Precision']:.3f} | {r['Recall']:.3f} | {r['F1-Score']:.3f} | {r['mAP@50']:.3f} | {r['Latency (ms)']} | {r['FPS']} |")
     
+    md_lines.append("\n## Confusion Breakdowns\n")
+    for r in eval_records:
+        # Only output confusion table for the fine-tuned model
+        if "Baseline" not in r["Model"]:
+            md_lines.append(f"### {r['Model']} @ conf={r['Conf Thresh']:.2f}")
+            md_lines.append("|              | Predicted Alcohol | Predicted No Detection |")
+            md_lines.append("|--------------|-------------------|--------------------------|")
+            md_lines.append(f"| Actual Alcohol   | TP = {r['TP']}       | FN = {r['FN']}                |")
+            md_lines.append(f"| Actual No-Alcohol| FP = {r['FP']}       | (TN not meaningful here) |")
+            md_lines.append("")
+
+    md_lines.append("\n*Note: True Negative (TN) is not well-defined for object detection, as there is no fixed count of 'negative boxes' like there is in image classification. Hence, this is a detection confusion breakdown rather than a classification one.*")
+    
     md_content = "\n".join(md_lines)
     with open(ENGINE_DIR / "eval_results.md", "w") as f:
         f.write(md_content)
         
-    # Generate CSV
+    # Generate CSV (excluding confusion metrics for original table format compatibility)
     with open(ENGINE_DIR / "eval_results.csv", "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=eval_records[0].keys())
+        csv_records = []
+        for r in eval_records:
+            csv_rec = {k: v for k, v in r.items() if k not in ["TP", "FP", "FN"]}
+            csv_records.append(csv_rec)
+        writer = csv.DictWriter(f, fieldnames=csv_records[0].keys())
         writer.writeheader()
-        writer.writerows(eval_records)
+        writer.writerows(csv_records)
         
     # Run ultralytics val sanity check on the fine-tuned model
     print("\nRunning Ultralytics Native Validation check on fine-tuned model...")

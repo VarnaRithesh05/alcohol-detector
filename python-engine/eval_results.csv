@@ -1,5 +1,5 @@
 Model,Conf Thresh,Precision,Recall,F1-Score,mAP@50,Latency (ms),FPS
-Stock COCO YOLOv8n (Baseline),0.2,0.353,0.62,0.45,0.364,120.45,8.3
-Stock COCO YOLOv8n (Baseline),0.5,0.537,0.482,0.508,0.364,132.31,7.6
-Fine-Tuned YOLOv8n (Alcohol),0.2,0.767,0.723,0.744,0.697,102.32,9.8
-Fine-Tuned YOLOv8n (Alcohol),0.5,0.881,0.65,0.748,0.697,101.96,9.8
+Stock COCO YOLOv8n (Baseline),0.2,0.353,0.62,0.45,0.364,45.28,22.1
+Stock COCO YOLOv8n (Baseline),0.5,0.537,0.482,0.508,0.364,46.34,21.6
+Fine-Tuned YOLOv8n (Alcohol),0.2,0.77,0.854,0.81,0.829,42.27,23.7
+Fine-Tuned YOLOv8n (Alcohol),0.5,0.878,0.788,0.831,0.829,42.43,23.6

@@ -73,15 +73,33 @@ def generate_yaml():
         yaml.dump(yaml_content, f)
     return yaml_path
 
-def train_model(epochs=50, imgsz=640):
+def train_model(epochs=40, imgsz=640):
     yaml_path = generate_yaml()
     print(f"Loading baseline model yolov8n.pt for fine-tuning...")
     model = YOLO("yolov8n.pt")
     
-    print(f"Starting fine-tuning on alcohol dataset ({epochs} epochs)...")
-    results = model.train(data=str(yaml_path), epochs=epochs, imgsz=imgsz, project="runs", name="alcohol_finetune", exist_ok=True)
+    import torch
+    device = 0 if torch.cuda.is_available() else 'cpu'
+    print(f"Using device: {device}")
     
-    best_weights = Path("runs/alcohol_finetune/weights/best.pt")
+    print(f"Starting fine-tuning on alcohol dataset ({epochs} epochs)...")
+    results = model.train(
+        data=str(yaml_path),
+        epochs=epochs,
+        imgsz=imgsz,
+        batch=16,
+        device=device,
+        lr0=0.01,
+        momentum=0.937,
+        weight_decay=0.0005,
+        warmup_epochs=3,
+        optimizer='auto',
+        project="runs",
+        name="alcohol_real_training_v2",
+        exist_ok=True
+    )
+    
+    best_weights = Path("runs/alcohol_real_training_v2/weights/best.pt")
     if best_weights.exists():
         shutil.copy(best_weights, OUTPUT_MODEL)
         print(f"Exported fine-tuned weights to {OUTPUT_MODEL}")
@@ -90,4 +108,4 @@ def train_model(epochs=50, imgsz=640):
 
 if __name__ == "__main__":
     prepare_dataset_splits(DATASET_DIR)
-    train_model(epochs=50)
+    train_model(epochs=40)
