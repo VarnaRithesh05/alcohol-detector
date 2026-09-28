@@ -310,8 +310,8 @@ class DetectionEngine:
         self.pre.reset()
 
         if source == "screen":
-            from mss import mss
-            with mss() as sct:
+            from mss import MSS
+            with MSS() as sct:
                 monitor = sct.monitors[1]  # primary monitor
                 log.info("Opened screen capture")
                 frame_idx = 0
@@ -383,7 +383,7 @@ class DetectionEngine:
 
     def run(self):
         self.connect_server()
-        current_source = CAMERA_INDEX
+        current_source = "screen"
 
         try:
             while True:
