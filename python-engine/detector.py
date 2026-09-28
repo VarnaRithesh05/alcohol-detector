@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────
 SERVER_URL        = "http://localhost:3001"
+CAMERA_INDEX      = 0
 CONFIDENCE_THRESH = 0.20
 DEBOUNCE_FRAMES   = 3
 FRAME_SKIP        = 1
@@ -382,7 +383,7 @@ class DetectionEngine:
 
     def run(self):
         self.connect_server()
-        current_source = "screen"
+        current_source = CAMERA_INDEX
 
         try:
             while True:
