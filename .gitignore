@@ -11,7 +11,8 @@ pnpm-debug.log*
 build/
 dist/
 out/
-
+Alcohol_Detection_Paper_v2.docx
+Alcohol_Detection_Paper_v3.docx
 # ==============================================================================
 # Environment & Secrets
 # ==============================================================================
