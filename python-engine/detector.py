@@ -93,14 +93,16 @@ def is_valid_bottle_geometry(box: list, frame_shape: tuple) -> tuple:
     h = y2 - y1
     fh, fw = frame_shape[:2]
 
-    # Reject tiny noise
-    if w < 24 or h < 38:
-        return False, "too_small"
+    # Reject tiny noise or thin vertical strips (scrollbars, minimaps, gutters)
+    if w < 32 or h < 55:
+        return False, "too_small_or_thin"
 
-    # Aspect ratio: bottles/glasses are vertical (h > w) or slightly tilted
+    # Aspect ratio: real bottles/glasses have 0.65 <= h/w <= 5.0
     ar = h / max(1, w)
-    if ar < 0.60:
-        return False, f"banner_aspect_ratio_{ar:.2f}"
+    if ar < 0.65:
+        return False, f"horizontal_banner_ar_{ar:.2f}"
+    if ar > 5.0:
+        return False, f"vertical_minimap_scrollbar_ar_{ar:.2f}"
 
     # Reject wide horizontal banner ads spanning more than 60% of screen width
     if w > 0.60 * fw and h < 0.40 * fh:
