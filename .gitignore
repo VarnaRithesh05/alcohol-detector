@@ -1,33 +1,89 @@
-# Node / React
+# ==============================================================================
+# Node.js / React
+# ==============================================================================
 node_modules/
+*/node_modules/
+**/node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 build/
 dist/
+out/
 
-# Python / Virtual Environment
+# ==============================================================================
+# Environment & Secrets
+# ==============================================================================
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# ==============================================================================
+# Python / Virtual Environments / Caches
+# ==============================================================================
 __pycache__/
+*/__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 venv/
 .venv/
 env/
-.env
+ENV/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
-# YOLO / Dataset Caches
+# ==============================================================================
+# YOLO / ML Training / Checkpoints & Datasets
+# ==============================================================================
 *.cache
-python-engine/runs/detect/
-
-# Large Model Weights (Downloaded baseline models)
-yolov8n.pt
-yolov8s.pt
-yolov8m.pt
-yolov8x.pt
-yolov8s-world.pt
+runs/
+**/runs/
+python-engine/runs/
 dataset.zip
+python-engine/dataset.zip
+*.zip
+*.tar
+*.tar.gz
+*.rar
 
-# VS Code / IDE configuration
+# Baseline & Checkpoint Model Weights (preserve fine-tuned custom models)
+*.pt
+!python-engine/yolov8n_alcohol.pt
+!yolov8n_alcohol.pt
+
+# ==============================================================================
+# Uploads / Media Files
+# ==============================================================================
+backend/uploads/*
+!backend/uploads/.gitkeep
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# ==============================================================================
+# Microsoft Office / Temporary & Lock Files
+# ==============================================================================
+~$*
+~$*.docx
+~$*.doc
+~$*.xlsx
+~$*.pptx
+*.tmp
+*.bak
+
+# ==============================================================================
+# IDEs / Text Editors
+# ==============================================================================
 .vscode/
 .idea/
 *.suo
@@ -35,3 +91,17 @@ dataset.zip
 *.njsproj
 *.sln
 *.sw?
+*.sublime-project
+*.sublime-workspace
+
+# ==============================================================================
+# OS Generated Files
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini

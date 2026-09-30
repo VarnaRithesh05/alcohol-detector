@@ -1,0 +1,24 @@
+{
+  "name": "alcohol-detector",
+  "version": "1.0.0",
+  "description": "Real-time alcohol bottle detection system using YOLOv8 + Node.js + React.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VarnaRithesh05/alcohol-detector.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/VarnaRithesh05/alcohol-detector/issues"
+  },
+  "homepage": "https://github.com/VarnaRithesh05/alcohol-detector#readme",
+  "dependencies": {
+    "docx": "^9.7.1"
+  }
+}
