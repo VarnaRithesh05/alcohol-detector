@@ -19,6 +19,7 @@ from pathlib import Path
 from ultralytics import YOLO
 from ocr_reader import OCRReader
 import difflib
+import re
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [DETECTOR] %(message)s")
 log = logging.getLogger(__name__)
@@ -26,39 +27,90 @@ log = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────────
 SERVER_URL        = "http://localhost:3001"
 CAMERA_INDEX      = 0
-CONFIDENCE_THRESH = 0.20
+CONFIDENCE_THRESH = 0.45  # Stricter threshold to eliminate low-confidence hallucinations
 DEBOUNCE_FRAMES   = 3
 FRAME_SKIP        = 1
-MODEL_PATH        = Path(__file__).parent / "yolov8n_alcohol.pt"
-MODEL_NAME        = str(MODEL_PATH) if MODEL_PATH.exists() else "yolov8n.pt"
+COCO_MODEL_PATH   = Path(__file__).parent / "yolov8n.pt"
+ALC_MODEL_PATH    = Path(__file__).parent / "yolov8n_alcohol.pt"
 BRAND_DB_PATH     = Path(__file__).parent.parent / "brand-db" / "alcohol_brands.json"
-BOTTLE_CLASSES    = {"bottle", "wine glass", "cup", "alcohol"}
+BOTTLE_CLASSES    = {"bottle", "wine glass", "cup"}
+
+NON_ALCOHOL_KEYWORDS = {
+    "non-alcoholic", "non alcoholic", "alcohol free", "alcohol-free",
+    "0.0%", "zero alcohol", "rubbing alcohol", "sanitizer", "hand sanitizer",
+    "mineral water", "water", "juice", "apple juice", "orange juice"
+}
 
 # ── Brand DB ────────────────────────────────────────────────────────────────
 def load_brand_db(path: Path) -> set:
     with open(path) as f:
         data = json.load(f)
-    brands = {b.lower().strip() for b in data["brands"]}
+    GENERIC_WORDS = {"alcohol", "liquor", "spirit", "brew"}
+    brands = {b.lower().strip() for b in data["brands"] if b.lower().strip() not in GENERIC_WORDS}
     log.info(f"Loaded {len(brands)} alcohol brand keywords")
     return brands
 
-def match_brand(label_text: str, brand_db: set, threshold=0.7) -> bool:
-    label_lower = label_text.lower().strip()
-    if not label_lower:
-        return False
-    # 1. Direct match check
+def match_brand(label_text: str, brand_db: set, threshold=0.85) -> tuple:
+    """
+    Evaluates text for genuine alcohol brand names.
+    Uses whole-word boundaries and negative keyword filtering to avoid false positives.
+    """
+    text = label_text.lower().strip()
+    if not text:
+        return False, ""
+
+    # Negative phrase suppression (e.g. alcohol-free, rubbing alcohol, water)
+    for neg in NON_ALCOHOL_KEYWORDS:
+        if neg in text:
+            return False, ""
+
+    # 1. Exact word boundary match
     for brand in brand_db:
-        if brand in label_lower:
-            return True
-    # 2. Fuzzy match word check (edit distance / ratio)
-    words = label_lower.split()
+        pattern = r'\b' + re.escape(brand) + r'\b'
+        if re.search(pattern, text):
+            return True, brand
+
+    # 2. Strict fuzzy match only on words with length >= 5
+    words = re.findall(r'[a-z0-9]+', text)
     for brand in brand_db:
+        if len(brand) < 5:
+            continue
         for w in words:
-            if len(w) >= 3 and len(brand) >= 3:
-                ratio = difflib.SequenceMatcher(None, brand, w).ratio()
-                if ratio >= threshold:
-                    return True
-    return False
+            if len(w) >= 4 and abs(len(w) - len(brand)) <= 2:
+                if difflib.SequenceMatcher(None, brand, w).ratio() >= threshold:
+                    return True, brand
+
+    return False, ""
+
+# ── Geometry & Banner Filter ─────────────────────────────────────────────────
+def is_valid_bottle_geometry(box: list, frame_shape: tuple) -> tuple:
+    """
+    Validates physical container geometry to filter out horizontal web banners,
+    advertisement strips, full-screen windows, and tiny pixel noise.
+    """
+    x1, y1, x2, y2 = box
+    w = x2 - x1
+    h = y2 - y1
+    fh, fw = frame_shape[:2]
+
+    # Reject tiny noise
+    if w < 24 or h < 38:
+        return False, "too_small"
+
+    # Aspect ratio: bottles/glasses are vertical (h > w) or slightly tilted
+    ar = h / max(1, w)
+    if ar < 0.60:
+        return False, f"banner_aspect_ratio_{ar:.2f}"
+
+    # Reject wide horizontal banner ads spanning more than 60% of screen width
+    if w > 0.60 * fw and h < 0.40 * fh:
+        return False, "horizontal_screen_banner"
+
+    # Reject full-screen bounding boxes
+    if w > 0.85 * fw and h > 0.85 * fh:
+        return False, "full_screen_box"
+
+    return True, "ok"
 
 # ── Pre-check ───────────────────────────────────────────────────────────────
 class PreChecker:
@@ -71,7 +123,6 @@ class PreChecker:
     def check(self, frame: np.ndarray) -> dict:
         gray     = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         mean_lum = float(np.mean(gray))
-        # Guard against size mismatch (e.g. source resolution changed)
         if self.prev_gray is not None and self.prev_gray.shape != gray.shape:
             self.prev_gray = None
         motion   = float(np.mean(cv2.absdiff(gray, self.prev_gray))) if self.prev_gray is not None else 0.0
@@ -107,7 +158,18 @@ class DetectionEngine:
     def __init__(self):
         self.brand_db  = load_brand_db(BRAND_DB_PATH)
         self.ocr       = OCRReader()
-        self.model     = YOLO(MODEL_NAME)
+
+        # Primary physical container detector (COCO pretrained: bottle, wine glass, cup, person)
+        coco_file = COCO_MODEL_PATH if COCO_MODEL_PATH.exists() else "yolov8n.pt"
+        self.model_coco = YOLO(str(coco_file))
+
+        # Fine-tuned alcohol vs non-alcohol visual classifier
+        alc_file = ALC_MODEL_PATH if ALC_MODEL_PATH.exists() else coco_file
+        self.model_alcohol = YOLO(str(alc_file))
+
+        # Alias for backwards compatibility
+        self.model = self.model_alcohol
+
         self.pre       = PreChecker()
         self.debouncer = Debouncer(DEBOUNCE_FRAMES)
         self.sio       = socketio.Client()
@@ -115,11 +177,11 @@ class DetectionEngine:
 
         # Video switching state
         self._lock           = threading.Lock()
-        self._pending_video  = None   # path string if a video was requested
-        self._use_screen     = False  # flag to switch to screen capture
-        self._stop_current   = False  # signal current capture to stop
-        self._popup_process  = None   # track the popup process
-        self._last_alert_time = 0     # track when the last detection happened
+        self._pending_video  = None
+        self._use_screen     = False
+        self._stop_current   = False
+        self._popup_process  = None
+        self._last_alert_time = 0
 
         self._setup_socket()
 
@@ -154,7 +216,6 @@ class DetectionEngine:
         try:
             self.sio.connect(SERVER_URL, headers={"client": "python"},
                              auth=None, transports=["websocket"])
-            # Pass client type as query param
             self.sio.disconnect()
             self.sio.connect(SERVER_URL + "?client=python", transports=["websocket"])
         except Exception as e:
@@ -176,129 +237,158 @@ class DetectionEngine:
         })
 
     def process_frame(self, frame: np.ndarray) -> dict:
+        if frame is None or frame.size == 0:
+            return {"status": "empty", "detections": []}
         pre = self.pre.check(frame)
         if pre["occluded"]:
             if self.connected:
                 self.sio.emit("camera_alert", {"reason": "occluded", "luminance": pre["luminance"]})
-            return {"status": "occluded"}
+            return {"status": "occluded", "detections": []}
 
-        results      = self.model(frame, verbose=False, conf=CONFIDENCE_THRESH)[0]
+        h, w = frame.shape[:2]
         detections   = []
         bottle_found = False
         best_det     = None
 
-        # Extract persons for action detection
-        persons = [list(map(int, box.xyxy[0])) for box in results.boxes if self.model.names[int(box.cls[0])].lower() == "person"]
+        # ── 1. PRIMARY REQUIREMENT: PHYSICAL BOTTLE / CONTAINER PRESENCE ─────
+        # Physical objects (bottle, wine glass, cup, person) detected via COCO model.
+        coco_res = self.model_coco(frame, verbose=False, conf=CONFIDENCE_THRESH)[0]
+
+        # Extract persons for drinking action detection
+        persons = [
+            list(map(int, box.xyxy[0]))
+            for box in coco_res.boxes
+            if int(box.cls[0]) == 0  # 0: person in COCO
+        ]
 
         def check_action(bx1, by1, bx2, by2, person_list):
             for px1, py1, px2, py2 in person_list:
-                head_bottom = py1 + (py2 - py1) * 0.4
+                head_bottom = py1 + (py2 - py1) * 0.45
                 intersect_x = max(0, min(bx2, px2) - max(bx1, px1))
                 intersect_y = max(0, min(by2, head_bottom) - max(by1, py1))
                 if intersect_x > 0 and intersect_y > 0:
                     return True
             return False
 
-        # Process upright results
-        for box in results.boxes:
+        # Gather candidate containers and enforce geometry validation
+        candidate_containers = []
+        for box in coco_res.boxes:
             cls_id   = int(box.cls[0])
-            cls_name = self.model.names[cls_id].lower()
+            cls_name = self.model_coco.names[cls_id].lower()
             conf     = float(box.conf[0])
+
             if cls_name not in BOTTLE_CLASSES:
                 continue
 
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            bx1, by1, bx2, by2 = map(int, box.xyxy[0])
+            valid_geo, reason = is_valid_bottle_geometry([bx1, by1, bx2, by2], frame.shape)
+            if not valid_geo:
+                log.debug(f"Banner/non-bottle candidate rejected ({reason}): [{bx1},{by1},{bx2},{by2}]")
+                continue
+
+            candidate_containers.append((cls_name, conf, [bx1, by1, bx2, by2]))
+
+        # If no physical container is present, DO NOT flag anything.
+        # Banners, website headlines, articles mentioning 'alcohol' are immediately dismissed.
+        if not candidate_containers:
+            self.debouncer.update(False)
+            self.emit_frame(frame, detections)
+            return {"status": "clear", "detections": []}
+
+        # ── 2. ALCOHOL VERIFICATION & OPTIONAL TEXT MATCHING ─────────────────
+        for c_name, c_conf, (x1, y1, x2, y2) in candidate_containers:
             drinking = check_action(x1, y1, x2, y2, persons)
-            
+            crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+            if crop.size == 0:
+                continue
+
+            # 2a. Visual fine-tuned model classification on container crop
+            alc_conf = 0.0
+            no_alc_conf = 0.0
+            if self.model_alcohol is not self.model_coco:
+                r_alc = self.model_alcohol(crop, verbose=False, conf=0.30)[0]
+                for b in r_alc.boxes:
+                    name = self.model_alcohol.names[int(b.cls[0])]
+                    conf_val = float(b.conf[0])
+                    if name == "alcohol":
+                        alc_conf = max(alc_conf, conf_val)
+                    elif name == "no-alcohol":
+                        no_alc_conf = max(no_alc_conf, conf_val)
+            else:
+                alc_conf = c_conf
+
+            # 2b. Optional Text / Brand matching (OCR on container crop only)
             ocr_text = ""
-            if conf >= CONFIDENCE_THRESH and cls_name in BOTTLE_CLASSES:
-                crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
+            brand_hit = False
+            matched_brand_name = ""
+            if self.ocr.available:
                 ocr_text = self.ocr.read(crop)
+                if ocr_text:
+                    brand_hit, matched_brand_name = match_brand(ocr_text, self.brand_db)
 
-            brand_text = ocr_text if ocr_text else cls_name
-            brand_hit  = match_brand(brand_text, self.brand_db)
-            color      = (0, 0, 255) if drinking else ((0, 200, 0) if brand_hit else (200, 200, 0))
+            # Determine whether this container is alcohol
+            is_alcohol = False
+            if brand_hit:
+                is_alcohol = True
+            elif alc_conf >= 0.40 and alc_conf >= no_alc_conf:
+                is_alcohol = True
+            elif c_name in {"wine glass"}:
+                is_alcohol = True
+
+            # Suppress non-alcohol beverages when clearly classified as no-alcohol and no brand match
+            if no_alc_conf > 0.65 and not brand_hit:
+                is_alcohol = False
+
+            if not is_alcohol:
+                # Regular non-alcohol container (water bottle, soda, etc.)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (180, 180, 180), 1)
+                cv2.putText(frame, f"{c_name} (clear)", (x1, y1 - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+                continue
+
+            bottle_found = True
+            disp_conf = max(alc_conf, c_conf)
+            label_name = matched_brand_name.title() if brand_hit else f"Alcohol {c_name.title()}"
+            if drinking:
+                label_name += " [DRINKING]"
+
+            color = (0, 0, 255) if drinking else ((0, 200, 0) if brand_hit else (0, 140, 255))
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            
-            display_label = f"{brand_text[:15]} {conf:.2f}" if ocr_text else f"{cls_name} {conf:.2f}"
-            label = display_label + (" [DRINKING]" if drinking else "")
-            cv2.putText(frame, label, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+            cv2.putText(frame, f"{label_name} {disp_conf:.2f}", (x1, y1 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
-            det = {"class": cls_name, "confidence": round(conf, 3),
-                   "bbox": [x1, y1, x2, y2], "brand_matched": brand_hit,
-                   "ocr_text": ocr_text,
-                   "drinking_action": drinking,
-                   "timestamp": time.time()}
+            det = {
+                "class": label_name,
+                "confidence": round(disp_conf, 3),
+                "bbox": [x1, y1, x2, y2],
+                "brand_matched": brand_hit,
+                "brand_name": matched_brand_name,
+                "ocr_text": ocr_text,
+                "drinking_action": drinking,
+                "timestamp": time.time(),
+            }
             detections.append(det)
 
-            if conf >= CONFIDENCE_THRESH:
-                bottle_found = True
-                if not best_det or conf > best_det["confidence"] or (drinking and not best_det.get("drinking_action", False)):
-                    best_det = det
-
-        # If no contraband found upright, try upside down
-        if not bottle_found:
-            frame_180 = cv2.rotate(frame, cv2.ROTATE_180)
-            results_180 = self.model(frame_180, verbose=False, conf=CONFIDENCE_THRESH)[0]
-            persons_180 = [list(map(int, box.xyxy[0])) for box in results_180.boxes if self.model.names[int(box.cls[0])].lower() == "person"]
-            
-            for box in results_180.boxes:
-                cls_id   = int(box.cls[0])
-                cls_name = self.model.names[cls_id].lower()
-                conf     = float(box.conf[0])
-                if cls_name not in BOTTLE_CLASSES:
-                    continue
-
-                # Coordinate adjustment
-                h, w = frame.shape[:2]
-                rx1, ry1, rx2, ry2 = map(int, box.xyxy[0])
-                nx1, ny1 = w - rx2, h - ry2
-                nx2, ny2 = w - rx1, h - ry1
-                
-                drinking = check_action(rx1, ry1, rx2, ry2, persons_180)
-                
-                ocr_text = ""
-                if conf >= CONFIDENCE_THRESH and cls_name in BOTTLE_CLASSES:
-                    crop = frame_180[max(0, ry1):min(h, ry2), max(0, rx1):min(w, rx2)]
-                    ocr_text = self.ocr.read(crop)
-
-                brand_text = ocr_text if ocr_text else cls_name
-                brand_hit  = match_brand(brand_text, self.brand_db)
-                color      = (0, 0, 255) if drinking else ((0, 200, 0) if brand_hit else (200, 200, 0))
-                cv2.rectangle(frame, (nx1, ny1), (nx2, ny2), color, 2)
-                
-                display_label = f"{brand_text[:15]} {conf:.2f} (inv)" if ocr_text else f"{cls_name} {conf:.2f} (inv)"
-                label = display_label + (" [DRINKING]" if drinking else "")
-                cv2.putText(frame, label, (nx1, ny1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-
-                det = {"class": f"{cls_name} (inv)", "confidence": round(conf, 3),
-                       "bbox": [nx1, ny1, nx2, ny2], "brand_matched": brand_hit,
-                       "ocr_text": ocr_text,
-                       "drinking_action": drinking,
-                       "timestamp": time.time()}
-                detections.append(det)
-
-                if conf >= CONFIDENCE_THRESH:
-                    bottle_found = True
-                    if not best_det or conf > best_det["confidence"] or (drinking and not best_det.get("drinking_action", False)):
-                        best_det = det
+            if not best_det or disp_conf > best_det["confidence"] or (drinking and not best_det.get("drinking_action", False)):
+                best_det = det
 
         newly_alerted, is_alerting = self.debouncer.update(bottle_found)
         if newly_alerted and best_det:
             self.emit_alert(best_det)
-            # Launch the OS-level popup overlay if not already running
             if self._popup_process is None:
                 popup_path = Path(__file__).parent / "popup.py"
                 mode = "drinking" if best_det.get("drinking_action") else "bottle"
                 self._popup_process = subprocess.Popen([sys.executable, str(popup_path), mode])
-                
+
         if is_alerting:
             self._last_alert_time = time.time()
-            
+
         if not is_alerting and self._popup_process is not None:
-            # Hold the popup open for at least 4 seconds after the bottle disappears
             if time.time() - self._last_alert_time > 4.0:
-                self._popup_process.terminate()
+                try:
+                    self._popup_process.terminate()
+                except Exception:
+                    pass
                 self._popup_process = None
 
         self.emit_frame(frame, detections)
