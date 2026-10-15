@@ -114,46 +114,93 @@ def is_valid_bottle_geometry(box: list, frame_shape: tuple) -> tuple:
 
     return True, "ok"
 
-# ── Pre-check ───────────────────────────────────────────────────────────────
+# ── Objective 1: Adaptive Spatio-Temporal Ingestion & Redundancy Suppression ───
 class PreChecker:
-    def __init__(self):
+    def __init__(self, motion_threshold: float = 0.45):
         self.prev_gray = None
+        self.motion_threshold = motion_threshold
+        self.static_frame_count = 0
 
     def reset(self):
         self.prev_gray = None
+        self.static_frame_count = 0
 
-    def check(self, frame: np.ndarray) -> dict:
-        gray     = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    def check(self, frame: np.ndarray, has_active_detections: bool = False) -> dict:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         mean_lum = float(np.mean(gray))
         if self.prev_gray is not None and self.prev_gray.shape != gray.shape:
             self.prev_gray = None
-        motion   = float(np.mean(cv2.absdiff(gray, self.prev_gray))) if self.prev_gray is not None else 0.0
+            
+        motion = float(np.mean(cv2.absdiff(gray, self.prev_gray))) if self.prev_gray is not None else 10.0
         self.prev_gray = gray
+
+        # Illumination thresholding (underexposed/occluded or blinding specular glare)
+        is_occluded = mean_lum < 15.0
+        is_glare_blinded = mean_lum > 248.0
+        is_illumination_ok = not (is_occluded or is_glare_blinded)
+
+        # Motion saliency differencing & compute redundancy suppression
+        is_static = motion < self.motion_threshold and not has_active_detections
+        if is_static:
+            self.static_frame_count += 1
+        else:
+            self.static_frame_count = 0
+
+        # Allow adaptive skipping if scene has been static for > 2 frames without active targets
+        can_skip_deep_inference = self.static_frame_count >= 2
+
         return {
-            "ok":           mean_lum >= 15,
-            "occluded":     mean_lum < 15,
-            "luminance":    round(mean_lum, 1),
+            "ok": is_illumination_ok,
+            "occluded": is_occluded,
+            "glare_blinded": is_glare_blinded,
+            "luminance": round(mean_lum, 1),
             "motion_score": round(motion, 2),
+            "can_skip_compute": can_skip_deep_inference,
         }
 
-# ── Debouncer ───────────────────────────────────────────────────────────────
+# ── Objective 1: Sliding-Window Temporal Debouncer ──────────────────────────
 class Debouncer:
     def __init__(self, threshold: int):
         self.threshold = threshold
-        self.count     = 0
-        self.alerted   = False
+        self.window = []
+        self.alerted = False
 
     def update(self, detected: bool) -> tuple:
+        self.window.append(1 if detected else 0)
+        if len(self.window) > self.threshold:
+            self.window.pop(0)
+
         newly_alerted = False
-        if detected:
-            self.count += 1
-            if self.count >= self.threshold and not self.alerted:
+        # Debounce: Alert only when positive detection window reaches threshold
+        if len(self.window) >= self.threshold and sum(self.window) == self.threshold:
+            if not self.alerted:
                 self.alerted = True
                 newly_alerted = True
-        else:
-            self.count   = 0
+        elif sum(self.window) == 0:
             self.alerted = False
+
         return newly_alerted, self.alerted
+
+# ── Objective 4: Deterministic Policy Dispatch Pipeline ──────────────────────
+class DeterministicPolicyDispatcher:
+    """
+    Evaluates contextual disambiguation outputs to enforce deterministic alerting rules:
+    - CRITICAL_ALCOHOL_ALERT: Confirmed brand match or confirmed alcohol in drinking gesture.
+    - SUSPICIOUS_CONTAINER_WARNING: Unconfirmed alcohol container in view.
+    - BENIGN_SUPPRESSED: Innocuous soft drink, water, or non-alcoholic mug.
+    """
+    POLICY_CRITICAL   = "CRITICAL_ALCOHOL_ALERT"
+    POLICY_SUSPICIOUS = "SUSPICIOUS_CONTAINER_WARNING"
+    POLICY_BENIGN     = "BENIGN_SUPPRESSED"
+
+    @classmethod
+    def dispatch(cls, brand_matched: bool, is_alcohol: bool, drinking_action: bool, conf: float) -> tuple:
+        if brand_matched or (is_alcohol and drinking_action):
+            return cls.POLICY_CRITICAL, "high", True
+        elif is_alcohol and conf >= 0.40:
+            return cls.POLICY_SUSPICIOUS, "medium", False
+        else:
+            return cls.POLICY_BENIGN, "none", False
 
 # ── Detection Engine ────────────────────────────────────────────────────────
 class DetectionEngine:
@@ -341,20 +388,28 @@ class DetectionEngine:
             if no_alc_conf > 0.65 and not brand_hit:
                 is_alcohol = False
 
-            if not is_alcohol:
+            # Objective 4: Dual-Stage Contextual Disambiguation & Policy Dispatch
+            policy, severity, should_trigger_alert = DeterministicPolicyDispatcher.dispatch(
+                brand_matched=brand_hit,
+                is_alcohol=is_alcohol,
+                drinking_action=drinking,
+                conf=max(alc_conf, c_conf)
+            )
+
+            if policy == DeterministicPolicyDispatcher.POLICY_BENIGN:
                 # Regular non-alcohol container (water bottle, soda, etc.)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (180, 180, 180), 1)
                 cv2.putText(frame, f"{c_name} (clear)", (x1, y1 - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
                 continue
 
-            bottle_found = True
+            bottle_found = should_trigger_alert or bottle_found
             disp_conf = max(alc_conf, c_conf)
             label_name = matched_brand_name.title() if brand_hit else f"Alcohol {c_name.title()}"
             if drinking:
                 label_name += " [DRINKING]"
 
-            color = (0, 0, 255) if drinking else ((0, 200, 0) if brand_hit else (0, 140, 255))
+            color = (0, 0, 255) if severity == "high" else (0, 140, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, f"{label_name} {disp_conf:.2f}", (x1, y1 - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
@@ -367,6 +422,8 @@ class DetectionEngine:
                 "brand_name": matched_brand_name,
                 "ocr_text": ocr_text,
                 "drinking_action": drinking,
+                "policy": policy,
+                "severity": severity,
                 "timestamp": time.time(),
             }
             detections.append(det)

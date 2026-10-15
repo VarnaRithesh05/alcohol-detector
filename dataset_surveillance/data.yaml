@@ -1,0 +1,7 @@
+path: D:/alcohol-detector/dataset_surveillance
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: alcohol
+  1: no-alcohol
