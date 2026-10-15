@@ -229,6 +229,18 @@ def run_ablation_study(
 ):
     global USE_NWD_LOSS
 
+    # Auto-sanitize data.yaml path for seamless execution across Windows and Linux/Colab
+    if os.path.exists(data_yaml):
+        dataset_dir = os.path.dirname(os.path.abspath(data_yaml)).replace("\\", "/")
+        with open(data_yaml, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        with open(data_yaml, "w", encoding="utf-8") as f:
+            for line in lines:
+                if line.strip().startswith("path:"):
+                    f.write(f"path: {dataset_dir}\n")
+                else:
+                    f.write(line)
+
     if device == "auto":
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
     elif device in ["0", "cuda", "cuda:0", 0] and not torch.cuda.is_available():
